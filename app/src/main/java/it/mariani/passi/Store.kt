@@ -53,6 +53,11 @@ object Store {
     fun lastCounter(c: Context) = p(c).getFloat("lastCounter", -1f)
     fun setLastCounter(c: Context, v: Float) = p(c).edit().putFloat("lastCounter", v).apply()
 
+    // --- passi gia' contati ma non ancora classificati (blocco in corso) ---
+    fun pending(c: Context, day: String = dayKey()) = p(c).getLong("${day}_pending", 0)
+    fun setPending(c: Context, day: String, v: Long) =
+        p(c).edit().putLong("${day}_pending", v).apply()
+
     // --- statistiche giornaliere ---
     fun stats(c: Context, day: String = dayKey()): DayStats {
         val s = p(c)

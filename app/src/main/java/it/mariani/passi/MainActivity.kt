@@ -2,6 +2,7 @@ package it.mariani.passi
 
 import android.Manifest
 import android.app.Activity
+import android.app.NotificationManager
 import android.content.Intent
 import android.content.pm.PackageManager
 import android.hardware.Sensor
@@ -9,7 +10,10 @@ import android.hardware.SensorManager
 import android.net.Uri
 import android.os.Build
 import android.os.Bundle
+import android.os.Handler
+import android.os.Looper
 import android.os.PowerManager
+import android.os.SystemClock
 import android.provider.Settings
 import android.text.InputType
 import android.view.ViewGroup.LayoutParams.MATCH_PARENT
@@ -29,6 +33,15 @@ class MainActivity : Activity() {
     private lateinit var height: EditText
     private lateinit var weight: EditText
     private lateinit var stride: EditText
+
+    // Aggiornamento automatico della schermata ogni 2 secondi mentre l'app è aperta
+    private val handler = Handler(Looper.getMainLooper())
+    private val tick = object : Runnable {
+        override fun run() {
+            refresh()
+            handler.postDelayed(this, 2_000)
+        }
+    }
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -79,24 +92,55 @@ class MainActivity : Activity() {
 
     override fun onResume() {
         super.onResume()
-        refresh()
+        handler.post(tick)
+    }
+
+    override fun onPause() {
+        handler.removeCallbacks(tick)
+        super.onPause()
     }
 
     private fun fmt(f: Float) = if (f % 1f == 0f) f.toInt().toString() else f.toString()
 
     private fun refresh() {
-        today.text = Calc.summary(this, Store.stats(this))
+        val st = Store.stats(this)
+        val pending = if (Store.inWindow()) Store.pending(this) else 0L
+        var txt = Calc.summary(this, st)
+        if (pending > 0) txt += String.format(
+            Locale.ITALY, "\n+ %,d passi appena fatti, in attesa di classificazione", pending
+        )
+        today.text = txt
+
         val sm = getSystemService(SENSOR_SERVICE) as SensorManager
         val hasStep = sm.getDefaultSensor(Sensor.TYPE_STEP_COUNTER) != null
         val hasBaro = sm.getDefaultSensor(Sensor.TYPE_PRESSURE) != null
         val pm = getSystemService(POWER_SERVICE) as PowerManager
         val exempt = pm.isIgnoringBatteryOptimizations(packageName)
+        val notifOk = (getSystemService(NOTIFICATION_SERVICE) as NotificationManager)
+            .areNotificationsEnabled()
+        val counting = when {
+            !StepService.running -> "FERMO, premi Salva e avvia"
+            Store.inWindow() -> "attivo"
+            else -> "attivo, in pausa fino alle 6"
+        }
+        val baroLine = when {
+            !hasBaro -> "non disponibile"
+            StepService.liveAlt == null || StepService.lastBaroElapsed == 0L -> "nessuna lettura ancora"
+            else -> {
+                val age = (SystemClock.elapsedRealtime() - StepService.lastBaroElapsed) / 1000
+                String.format(Locale.ITALY, "%.1f m (letta %s)", StepService.liveAlt,
+                    if (age < 60) "$age s fa" else "${age / 60} min fa")
+            }
+        }
         status.text = String.format(
             Locale.ITALY,
-            "Contapassi hardware: %s\nBarometro: %s\nRisparmio batteria: %s\nPasso usato: %.0f cm",
+            "Conteggio: %s\nQuota dal barometro: %s\nContapassi hardware: %s\nBarometro: %s\nRisparmio batteria: %s\nNotifiche: %s\nPasso usato: %.0f cm",
+            counting,
+            baroLine,
             if (hasStep) "presente" else "ASSENTE, l'app non può funzionare",
             if (hasBaro) "presente" else "assente, salita e discesa non distinguibili",
             if (exempt) "escluso" else "ATTIVO, conviene escludere l'app",
+            if (notifOk) "consentite" else "BLOCCATE, niente riepilogo delle 22",
             Store.strideM(this) * 100
         )
     }
@@ -106,9 +150,11 @@ class MainActivity : Activity() {
         val w = weight.text.toString().replace(',', '.').toFloatOrNull() ?: 80f
         val s = stride.text.toString().replace(',', '.').toFloatOrNull() ?: 0f
         Store.saveProfile(this, h, w, s)
-        startIfAllowed()
+        val started = startIfAllowed()
+        // Il servizio impiega un attimo a partire: aggiorno subito e di nuovo dopo un secondo
         refresh()
-        Toast.makeText(this, "Salvato", Toast.LENGTH_SHORT).show()
+        handler.postDelayed({ refresh() }, 1_000)
+        if (started) Toast.makeText(this, "Salvato, conteggio attivo", Toast.LENGTH_SHORT).show()
     }
 
     private fun requestNeededPermissions() {
@@ -127,15 +173,17 @@ class MainActivity : Activity() {
         startIfAllowed()
     }
 
-    private fun startIfAllowed() {
+    /** Avvia il servizio se il permesso c'è; restituisce true se è partito. */
+    private fun startIfAllowed(): Boolean {
         if (Build.VERSION.SDK_INT >= 29 &&
             checkSelfPermission(Manifest.permission.ACTIVITY_RECOGNITION) != PackageManager.PERMISSION_GRANTED
         ) {
             Toast.makeText(this, "Serve il permesso Attività fisica per contare i passi", Toast.LENGTH_LONG).show()
-            return
+            return false
         }
         StepService.start(this)
         Scheduler.scheduleReport(this)
+        return true
     }
 
     private fun askBatteryExemption() {
